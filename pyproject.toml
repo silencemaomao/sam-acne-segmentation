@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sam-acne-segmentation"
+version = "0.1.0"
+description = "Prompt-free acne segmentation using the Segment Anything image encoder"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "accelerate>=1.1,<2",
+  "numpy>=1.26,<3",
+  "Pillow>=10,<12",
+  "PyYAML>=6,<7",
+  "torch>=2.2",
+  "transformers>=4.45,<5",
+]
+
+[tool.setuptools.packages.find]
+include = ["sam_acne*"]
