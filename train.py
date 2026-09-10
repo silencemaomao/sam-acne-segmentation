@@ -63,7 +63,8 @@ def main() -> None:
     val_every, save_every = int(train_config["val_every_steps"]), int(train_config["save_every_steps"])
     log_every = int(train_config.get("log_every_steps", 20))
     threshold = float(config.get("evaluation", {}).get("threshold", 0.5))
-    metric_name = str(train_config.get("metric_for_best", "dice"))
+    metric_name = str(train_config.get("metric_for_best", "macro_dice"))
+    class_names = list(config["data"]["classes"])
     optimizer.zero_grad()
 
     for epoch in range(int(train_config.get("num_epochs", 100))):
@@ -98,7 +99,9 @@ def main() -> None:
                     accelerator.log(record, step=global_step)
 
             if global_step % val_every == 0 or global_step == max_steps:
-                metrics = evaluate(model, val_loader, criterion, accelerator, threshold)
+                metrics = evaluate(
+                    model, val_loader, criterion, accelerator, threshold, class_names
+                )
                 record = {"step": global_step, **{f"val_{k}": v for k, v in metrics.items()}}
                 accelerator.print(record)
                 if accelerator.is_main_process:

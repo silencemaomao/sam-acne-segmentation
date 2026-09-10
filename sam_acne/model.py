@@ -14,6 +14,7 @@ class SAMEncoderSegmenter(nn.Module):
         self,
         pretrained_name: str = "facebook/sam-vit-base",
         decoder_channels: int = 256,
+        num_classes: int = 1,
         dropout: float = 0.1,
         freeze_encoder: bool = True,
         gradient_checkpointing: bool = False,
@@ -40,7 +41,7 @@ class SAMEncoderSegmenter(nn.Module):
             nn.GELU(),
             nn.ConvTranspose2d(decoder_channels // 2, decoder_channels // 4, 2, stride=2),
             nn.GELU(),
-            nn.Conv2d(decoder_channels // 4, 1, 1),
+            nn.Conv2d(decoder_channels // 4, num_classes, 1),
         )
 
     def train(self, mode: bool = True):
@@ -67,14 +68,14 @@ class SAMEncoderSegmenter(nn.Module):
 
 
 class TinySegmenter(nn.Module):
-    def __init__(self, channels: int = 16) -> None:
+    def __init__(self, channels: int = 16, num_classes: int = 1) -> None:
         super().__init__()
         self.network = nn.Sequential(
             nn.Conv2d(3, channels, 3, padding=1),
             nn.ReLU(inplace=True),
             nn.Conv2d(channels, channels, 3, padding=1),
             nn.ReLU(inplace=True),
-            nn.Conv2d(channels, 1, 1),
+            nn.Conv2d(channels, num_classes, 1),
         )
 
     def forward(self, images: torch.Tensor) -> torch.Tensor:
@@ -84,6 +85,14 @@ class TinySegmenter(nn.Module):
 def build_model(config: dict[str, Any]) -> nn.Module:
     model_config = dict(config["model"])
     model_type = model_config.pop("type")
+    class_count = len(config["data"]["classes"])
+    configured_count = model_config.pop("num_classes", None)
+    if configured_count is not None and int(configured_count) != class_count:
+        raise ValueError(
+            f"model.num_classes={configured_count} does not match "
+            f"len(data.classes)={class_count}. Use null for automatic inference."
+        )
+    model_config["num_classes"] = class_count
     if model_type == "sam_encoder_segmenter":
         return SAMEncoderSegmenter(**model_config)
     if model_type == "tiny_segmenter":

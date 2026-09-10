@@ -1,12 +1,12 @@
-# Segment Anything 人脸痘痘热力图分割
+# Segment Anything 多类别人脸瑕疵热力图分割
 
-完整的 PyTorch + Segment Anything Model（SAM）语义分割项目。项目使用 SAM 图像编码器与可训练像素解码头，实现无需人工点/框提示的痘痘自动分割。
+完整的 PyTorch + Segment Anything Model（SAM）多标签语义分割项目。项目使用 SAM 图像编码器与可训练像素解码头，实现无需人工点/框提示的多类别人脸瑕疵自动分割。每个类别有一张独立 mask，因此同一像素可以同时属于多个类别。
 
 标签约定：
 
-- `255`：痘痘区域，目标为 1；
-- `0`：非痘痘区域，目标为 0；
-- `128`：不确定区域，不参与 Loss 和评估。
+- `255`：该类别的监督正区域，目标为 1；
+- `0`：该类别的监督负区域，目标为 0；
+- `128`：该类别的不监督区域，仅对当前类别忽略，不参与 Loss 和评估。
 
 数据路径、SAM 模型、Dataloader 类型、Loss、优化器、验证间隔和 Accelerator 参数全部由 YAML 控制。
 
@@ -38,7 +38,7 @@ sam_acne_project/
 
 ## 数据格式
 
-输入图片和标签按“相对路径 + 无扩展名文件名”配对，标签建议使用无损 PNG：
+类别在 YAML 的 `data.classes` 中定义。输入图片与每个类别的 mask 按“相对路径 + 无扩展名文件名”配对，mask 建议使用无损 PNG：
 
 ```text
 dataset/train/
@@ -46,11 +46,18 @@ dataset/train/
 │   ├── face_001.jpg
 │   └── sub/face_002.jpeg
 └── labels/
-    ├── face_001.png
-    └── sub/face_002.png
+    ├── acne/
+    │   ├── face_001.png
+    │   └── sub/face_002.png
+    ├── pigmentation/
+    │   ├── face_001.png
+    │   └── sub/face_002.png
+    └── scar/
+        ├── face_001.png
+        └── sub/face_002.png
 ```
 
-`strict_labels: true` 时，标签包含 0、128、255 以外的值会立即报错。标签缩放固定使用最近邻插值。
+每张输入图必须在每个类别目录下都有对应 mask。`strict_labels: true` 时，mask 包含 0、128、255 以外的值会立即报错。mask 缩放固定使用最近邻插值。
 
 ## 安装
 
@@ -69,6 +76,7 @@ pip install -e .
 
 ```yaml
 data:
+  classes: [acne, pigmentation, scar]
   train:
     input_dir: D:/dataset/acne/train/images
     label_dir: D:/dataset/acne/train/labels
@@ -90,6 +98,7 @@ dataloader:
   type: standard              # standard | weighted
 loss:
   type: masked_bce_dice       # masked_bce_dice | masked_focal_dice
+  positive_weight: [4.0, 2.0, 3.0]  # 顺序与 data.classes 相同
 ```
 
 SAM ViT-B 的绝对位置编码对应 1024×1024 输入，正式配置默认使用该尺寸。若要使用其他尺寸，需要更换支持位置编码插值的模型实现或重新训练位置编码，不能只修改 YAML 数字。
@@ -121,7 +130,7 @@ accelerate launch train.py --config configs/train.yaml
 python test.py --config configs/train.yaml
 ```
 
-输出包括 Precision、Recall、Dice/F1、IoU、Accuracy、Loss，以及恢复到原图尺寸的 0—255 预测热力图。
+输出包括每类别指标、macro/micro Precision、Recall、Dice/F1、IoU、Accuracy、Loss，以及恢复到原图尺寸的 0—255 预测热力图。热力图保存为 `输出目录/<类别>/<相对文件名>.png`。
 
 ## 完整 smoke 自检
 
@@ -133,7 +142,7 @@ python train.py --config configs/smoke.yaml
 python test.py --config configs/smoke.yaml
 ```
 
-`smoke.yaml` 的 `tiny_segmenter` 仅用于检查 Dataloader、128 ignore、Loss、反向传播、按 step 验证、checkpoint 和测试输出。正式训练请使用 `sam_encoder_segmenter`。
+`smoke.yaml` 使用 acne、pigmentation、scar 三类独立 mask；其 `tiny_segmenter` 仅用于检查多通道 Dataloader、逐类别 128 ignore、Loss、反向传播、按 step 验证、checkpoint 和分类别测试输出。正式训练请使用 `sam_encoder_segmenter`。
 
 ## 显存建议
 

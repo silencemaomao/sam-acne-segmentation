@@ -23,21 +23,28 @@ def parse_args():
 
 
 @torch.inference_mode()
-def save_predictions(model, dataloader, accelerator, output_dir: Path) -> None:
+def save_predictions(
+    model, dataloader, accelerator, output_dir: Path, class_names: list[str]
+) -> None:
     model.eval()
     if accelerator.is_main_process:
         output_dir.mkdir(parents=True, exist_ok=True)
     accelerator.wait_for_everyone()
     for batch in dataloader:
-        probabilities = torch.sigmoid(model(batch["image"])).squeeze(1).float().cpu()
-        for index, probability in enumerate(probabilities):
+        probabilities = torch.sigmoid(model(batch["image"])).float().cpu()
+        for index, sample_probabilities in enumerate(probabilities):
             height, width = [int(value) for value in batch["original_size"][index].tolist()]
-            heatmap = torch.nn.functional.interpolate(
-                probability[None, None], size=(height, width), mode="bilinear", align_corners=False
-            ).squeeze()
-            destination = output_dir / f"{batch['name'][index]}.png"
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            Image.fromarray(np.uint8(torch.clamp(heatmap * 255, 0, 255).numpy())).save(destination)
+            heatmaps = torch.nn.functional.interpolate(
+                sample_probabilities[None],
+                size=(height, width),
+                mode="bilinear",
+                align_corners=False,
+            ).squeeze(0)
+            for class_index, class_name in enumerate(class_names):
+                destination = output_dir / class_name / f"{batch['name'][index]}.png"
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                array = np.uint8(torch.clamp(heatmaps[class_index] * 255, 0, 255).numpy())
+                Image.fromarray(array).save(destination)
 
 
 def main() -> None:
@@ -56,9 +63,11 @@ def main() -> None:
     dataloader = build_dataloader(config, "test")
     criterion = build_loss(config).to(accelerator.device)
     model, dataloader = accelerator.prepare(model, dataloader)
+    class_names = list(config["data"]["classes"])
     metrics = evaluate(
         model, dataloader, criterion, accelerator,
         float(config.get("evaluation", {}).get("threshold", 0.5)),
+        class_names,
     )
     accelerator.print(json.dumps(metrics, indent=2))
     metrics_file = resolve_path(config, config["test"]["metrics_file"])
@@ -68,7 +77,7 @@ def main() -> None:
     if config["test"].get("save_heatmaps", True):
         save_predictions(
             model, dataloader, accelerator,
-            resolve_path(config, config["test"]["output_dir"]),
+            resolve_path(config, config["test"]["output_dir"]), class_names,
         )
 
 
