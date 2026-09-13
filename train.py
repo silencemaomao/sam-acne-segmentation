@@ -62,7 +62,6 @@ def main() -> None:
     max_steps = int(train_config["max_steps"])
     val_every, save_every = int(train_config["val_every_steps"]), int(train_config["save_every_steps"])
     log_every = int(train_config.get("log_every_steps", 20))
-    threshold = float(config.get("evaluation", {}).get("threshold", 0.5))
     metric_name = str(train_config.get("metric_for_best", "macro_dice"))
     class_names = list(config["data"]["classes"])
     optimizer.zero_grad()
@@ -71,7 +70,7 @@ def main() -> None:
         model.train()
         for batch in train_loader:
             with accelerator.accumulate(model):
-                losses = criterion(model(batch["image"]), batch["target"])
+                losses = criterion(model(batch["image"]), batch["allowed_classes"])
                 accelerator.backward(losses["total"])
                 if accelerator.sync_gradients:
                     accelerator.clip_grad_norm_(
@@ -100,7 +99,7 @@ def main() -> None:
 
             if global_step % val_every == 0 or global_step == max_steps:
                 metrics = evaluate(
-                    model, val_loader, criterion, accelerator, threshold, class_names
+                    model, val_loader, criterion, accelerator, class_names
                 )
                 record = {"step": global_step, **{f"val_{k}": v for k, v in metrics.items()}}
                 accelerator.print(record)

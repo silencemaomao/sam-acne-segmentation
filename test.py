@@ -31,7 +31,8 @@ def save_predictions(
         output_dir.mkdir(parents=True, exist_ok=True)
     accelerator.wait_for_everyone()
     for batch in dataloader:
-        probabilities = torch.sigmoid(model(batch["image"])).float().cpu()
+        # Channel 0 is background; export only mutually-exclusive defect probabilities.
+        probabilities = torch.softmax(model(batch["image"]), dim=1)[:, 1:].float().cpu()
         for index, sample_probabilities in enumerate(probabilities):
             height, width = [int(value) for value in batch["original_size"][index].tolist()]
             heatmaps = torch.nn.functional.interpolate(
@@ -65,9 +66,7 @@ def main() -> None:
     model, dataloader = accelerator.prepare(model, dataloader)
     class_names = list(config["data"]["classes"])
     metrics = evaluate(
-        model, dataloader, criterion, accelerator,
-        float(config.get("evaluation", {}).get("threshold", 0.5)),
-        class_names,
+        model, dataloader, criterion, accelerator, class_names,
     )
     accelerator.print(json.dumps(metrics, indent=2))
     metrics_file = resolve_path(config, config["test"]["metrics_file"])

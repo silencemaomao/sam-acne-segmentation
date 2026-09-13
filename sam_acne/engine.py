@@ -9,7 +9,7 @@ from .metrics import confusion_counts, metrics_from_counts
 
 @torch.inference_mode()
 def evaluate(
-    model, dataloader, criterion, accelerator, threshold: float, class_names: list[str]
+    model, dataloader, criterion, accelerator, class_names: list[str]
 ) -> dict[str, float]:
     was_training = model.training
     model.eval()
@@ -18,9 +18,9 @@ def evaluate(
     sample_count = torch.zeros(1, dtype=torch.float64, device=accelerator.device)
     for batch in dataloader:
         logits = model(batch["image"])
-        loss = criterion(logits, batch["target"])["total"]
+        loss = criterion(logits, batch["allowed_classes"])["total"]
         batch_size = batch["image"].shape[0]
-        counts += confusion_counts(logits, batch["target"], threshold)
+        counts += confusion_counts(logits, batch["allowed_classes"])
         loss_sum += loss.detach().double() * batch_size
         sample_count += batch_size
     counts = accelerator.reduce(counts, reduction="sum")

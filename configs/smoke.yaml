@@ -3,18 +3,19 @@ seed: 7
 data:
   image_size: [64, 64]
   strict_labels: true
+  unlabeled_image_policy: error
   classes: [acne, pigmentation, scar]
   train:
-    input_dir: smoke_data/train/images
-    label_dir: smoke_data/train/labels
+    input_dir: smoke_data_partial/train/images
+    label_dir: smoke_data_partial/train/labels
     horizontal_flip: 0.5
   val:
-    input_dir: smoke_data/val/images
-    label_dir: smoke_data/val/labels
+    input_dir: smoke_data_partial/val/images
+    label_dir: smoke_data_partial/val/labels
     horizontal_flip: 0.0
   test:
-    input_dir: smoke_data/test/images
-    label_dir: smoke_data/test/labels
+    input_dir: smoke_data_partial/test/images
+    label_dir: smoke_data_partial/test/labels
     horizontal_flip: 0.0
 
 dataloader:
@@ -32,10 +33,10 @@ model:
   num_classes: null
 
 loss:
-  type: masked_bce_dice
-  bce_weight: 1.0
+  type: partial_label_ce_dice
+  ce_weight: 1.0
   dice_weight: 1.0
-  positive_weight: [2.0, 2.0, 2.0]
+  class_weights: [1.0, 2.0, 2.0, 2.0]
   smooth: 1.0
 
 optimizer:
@@ -55,7 +56,7 @@ accelerator:
   log_with: null
 
 train:
-  output_dir: smoke_outputs_multiclass
+  output_dir: smoke_outputs_partial
   max_steps: 4
   num_epochs: 3
   val_every_steps: 2
@@ -66,11 +67,8 @@ train:
   greater_is_better: true
   resume_from: null
 
-evaluation:
-  threshold: 0.5
-
 test:
-  checkpoint: smoke_outputs_multiclass/best/model.pt
+  checkpoint: smoke_outputs_partial/best/model.pt
   save_heatmaps: true
-  output_dir: smoke_outputs_multiclass/test_heatmaps
-  metrics_file: smoke_outputs_multiclass/test_metrics.json
+  output_dir: smoke_outputs_partial/test_heatmaps
+  metrics_file: smoke_outputs_partial/test_metrics.json

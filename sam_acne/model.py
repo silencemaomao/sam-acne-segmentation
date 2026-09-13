@@ -86,13 +86,14 @@ def build_model(config: dict[str, Any]) -> nn.Module:
     model_config = dict(config["model"])
     model_type = model_config.pop("type")
     class_count = len(config["data"]["classes"])
+    output_count = class_count + 1  # explicit background + mutually-exclusive classes
     configured_count = model_config.pop("num_classes", None)
-    if configured_count is not None and int(configured_count) != class_count:
+    if configured_count is not None and int(configured_count) != output_count:
         raise ValueError(
             f"model.num_classes={configured_count} does not match "
-            f"len(data.classes)={class_count}. Use null for automatic inference."
+            f"len(data.classes)+1={output_count}. Use null for automatic inference."
         )
-    model_config["num_classes"] = class_count
+    model_config["num_classes"] = output_count
     if model_type == "sam_encoder_segmenter":
         return SAMEncoderSegmenter(**model_config)
     if model_type == "tiny_segmenter":

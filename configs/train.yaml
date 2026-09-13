@@ -3,6 +3,7 @@ seed: 42
 data:
   image_size: [1024, 1024]
   strict_labels: true
+  unlabeled_image_policy: error # error | skip；缺少部分类别 mask 是允许的
   classes: [acne, pigmentation, scar]
   train:
     input_dir: D:/dataset/acne/train/images
@@ -34,17 +35,15 @@ model:
   freeze_encoder: true
   gradient_checkpointing: false
   local_files_only: false
-  num_classes: null           # null 时自动等于 data.classes 数量
+  num_classes: null           # null 时自动等于 1（背景）+ data.classes 数量
 
 loss:
-  type: masked_bce_dice       # masked_bce_dice | masked_focal_dice
-  bce_weight: 1.0
+  type: partial_label_ce_dice
+  ce_weight: 1.0
   dice_weight: 1.0
-  # 可填单个数、按 classes 顺序的列表，或 {acne: 4.0, pigmentation: 2.0, scar: 3.0}
-  positive_weight: [4.0, 2.0, 3.0]
+  # 列表顺序必须为 [background, *data.classes]；字典中 background 可省略（默认 1）
+  class_weights: {background: 1.0, acne: 4.0, pigmentation: 2.0, scar: 3.0}
   smooth: 1.0
-  focal_alpha: 0.75
-  focal_gamma: 2.0
 
 optimizer:
   type: adamw
@@ -73,9 +72,6 @@ train:
   metric_for_best: macro_dice
   greater_is_better: true
   resume_from: null
-
-evaluation:
-  threshold: 0.5
 
 test:
   checkpoint: outputs/sam_acne/best/model.pt

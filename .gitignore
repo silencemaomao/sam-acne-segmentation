@@ -6,6 +6,7 @@ __pycache__/
 .vscode/
 outputs/
 smoke_data/
+smoke_data_partial/
 smoke_outputs*/
 *.pt
 *.pth

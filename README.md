@@ -1,159 +1,125 @@
-# Segment Anything 多类别人脸瑕疵热力图分割
+# Segment Anything 互斥多类别人脸瑕疵分割
 
-完整的 PyTorch + Segment Anything Model（SAM）多标签语义分割项目。项目使用 SAM 图像编码器与可训练像素解码头，实现无需人工点/框提示的多类别人脸瑕疵自动分割。每个类别有一张独立 mask，因此同一像素可以同时属于多个类别。
+完整的 PyTorch、SAM 图像编码器与 Accelerate 项目，支持类别互斥、0/128/255 热力图，
+以及同一数据集内混合的部分/完整标注。模型仅从人像自动预测，不会用真实 mask 构造
+SAM 点或框，避免测试阶段标签泄漏。
 
-标签约定：
+## 标签语义与串扰处理
 
-- `255`：该类别的监督正区域，目标为 1；
-- `0`：该类别的监督负区域，目标为 0；
-- `128`：该类别的不监督区域，仅对当前类别忽略，不参与 Loss 和评估。
+模型输出“背景 + data.classes”共 C+1 个 logits，并使用 softmax，从结构上保证一个像素
+只预测一个类别。每张已有类别 mask 会约束该像素的允许类别集合：
 
-数据路径、SAM 模型、Dataloader 类型、Loss、优化器、验证间隔和 Accelerator 参数全部由 YAML 控制。
+| 当前类别 mask | 允许类别 | 含义 |
+|---|---|---|
+| 255 | 仅当前类别 | 确定属于当前类，并排除背景及其他类 |
+| 128 | 当前类别或背景 | 当前类不确定，但确定不属于其他瑕疵类 |
+| 0 | 除当前类别外的所有类 | 仅确定不属于当前类 |
+| mask 缺失 | 不增加约束 | 未标注，绝不自动当作负样本 |
 
-## 为什么不直接用标签生成 SAM 提示框
+多个 mask 的约束取交集。只有所有类别均有 mask 且某像素全为 0 时，才能确定它是背景；
+若只有 acne mask 且值为 0，该像素仍可属于背景或任一未标注类别。两个类别 255 重叠，
+或一个类别 128 与另一类别 255 重叠，会被 Dataset 识别为互斥冲突并报告位置。
 
-原始 SAM 是提示式分割模型，需要点或框。若测试阶段从真实热力图生成提示，等于向模型泄露答案。本项目仅保留预训练 `vision_encoder`，增加自动二值分割头，因此 train、val、test 都只输入人像图，不读取标签来构造模型输入；标签只用于 Loss 和指标。
+partial_label_ce_dice 使用集合标签交叉熵：
 
-## 项目结构
+~~~text
+-log(sum(softmax(logits)[允许类别]))
+~~~
 
-```text
-sam_acne_project/
-├── sam_acne/
-│   ├── config.py
-│   ├── data.py
-│   ├── model.py
-│   ├── loss.py
-│   ├── metrics.py
-│   ├── engine.py
-│   └── utils.py
-├── configs/
-│   ├── train.yaml
-│   └── smoke.yaml
-├── tools/create_smoke_data.py
-├── train.py
-├── test.py
-├── requirements.txt
-└── pyproject.toml
-```
+Dice 与验证指标仅在标注将类别唯一确定的像素上计算，避免未知类别制造错误负样本。
 
 ## 数据格式
 
-类别在 YAML 的 `data.classes` 中定义。输入图片与每个类别的 mask 按“相对路径 + 无扩展名文件名”配对，mask 建议使用无损 PNG：
+图片和 mask 按相对路径（忽略扩展名）配对。类别目录或单个 mask 可以缺失：
 
-```text
+~~~text
 dataset/train/
 ├── images/
 │   ├── face_001.jpg
-│   └── sub/face_002.jpeg
+│   ├── face_002.jpg
+│   └── face_003.jpg
 └── labels/
     ├── acne/
-    │   ├── face_001.png
-    │   └── sub/face_002.png
+    │   ├── face_001.png      # 只标 acne
+    │   └── face_003.png      # face_003 全标
     ├── pigmentation/
-    │   ├── face_001.png
-    │   └── sub/face_002.png
+    │   ├── face_002.png      # 只标 pigmentation
+    │   └── face_003.png
     └── scar/
-        ├── face_001.png
-        └── sub/face_002.png
-```
+        └── face_003.png
+~~~
 
-每张输入图必须在每个类别目录下都有对应 mask。`strict_labels: true` 时，mask 包含 0、128、255 以外的值会立即报错。mask 缩放固定使用最近邻插值。
+strict_labels: true 会拒绝 0、128、255 以外的值；mask 应使用无损 PNG，缩放固定为最近邻。
+每张图默认至少需要一个 mask。完全无标签图片可通过下列配置跳过：
 
-## 安装
+~~~yaml
+data:
+  unlabeled_image_policy: skip   # error | skip
+~~~
 
-```powershell
+## 安装与配置
+
+~~~powershell
 cd D:\sam_acne_project
 python -m venv .venv
 .venv\Scripts\Activate.ps1
 pip install -e .
-```
+~~~
 
-如使用 NVIDIA GPU，请先从 PyTorch 官网安装匹配本机 CUDA 的 PyTorch。首次正式运行会从 Hugging Face 下载 SAM 权重。
+正式配置见 configs/train.yaml，所有路径和组件均由 YAML 控制：
 
-## 配置数据路径
-
-编辑 `configs/train.yaml`：
-
-```yaml
+~~~yaml
 data:
   classes: [acne, pigmentation, scar]
-  train:
-    input_dir: D:/dataset/acne/train/images
-    label_dir: D:/dataset/acne/train/labels
-  val:
-    input_dir: D:/dataset/acne/val/images
-    label_dir: D:/dataset/acne/val/labels
-  test:
-    input_dir: D:/dataset/acne/test/images
-    label_dir: D:/dataset/acne/test/labels
-```
-
-可从 YAML 切换组件：
-
-```yaml
 model:
   type: sam_encoder_segmenter
   pretrained_name: facebook/sam-vit-base
-dataloader:
-  type: standard              # standard | weighted
+  num_classes: null  # 自动为背景 + 3 类
 loss:
-  type: masked_bce_dice       # masked_bce_dice | masked_focal_dice
-  positive_weight: [4.0, 2.0, 3.0]  # 顺序与 data.classes 相同
-```
+  type: partial_label_ce_dice
+  ce_weight: 1.0
+  dice_weight: 1.0
+  class_weights: {background: 1.0, acne: 4.0, pigmentation: 2.0, scar: 3.0}
+~~~
 
-SAM ViT-B 的绝对位置编码对应 1024×1024 输入，正式配置默认使用该尺寸。若要使用其他尺寸，需要更换支持位置编码插值的模型实现或重新训练位置编码，不能只修改 YAML 数字。
+SAM ViT-B 的绝对位置编码对应 1024×1024，正式配置默认使用该尺寸。项目保留预训练
+vision encoder 并增加 prompt-free 像素解码头。
 
-## 训练
+注意：v0.3 起输出通道由 C 改为 C+1，旧版独立 sigmoid 模型的 checkpoint 结构不兼容，
+需按新配置重新训练。
 
-```powershell
+## 训练与测试
+
+~~~powershell
 python train.py --config configs/train.yaml
-```
+python test.py --config configs/train.yaml
+~~~
 
-多卡：
+多卡训练：
 
-```powershell
+~~~powershell
 accelerate config
 accelerate launch train.py --config configs/train.yaml
-```
+~~~
 
-- `train.val_every_steps`：每隔指定优化器 step 验证；
-- `train.save_every_steps`：保存完整 Accelerator 状态；
-- `train.resume_from`：从 `checkpoint-step-XXXXXX` 恢复；
-- `model.freeze_encoder`：是否冻结 SAM 图像编码器；
-- `optimizer.encoder_lr_multiplier`：编码器学习率相对解码头的倍率。
+train.val_every_steps 与 save_every_steps 按优化器 step 计数，train.resume_from 可恢复完整
+Accelerator 状态。测试使用 softmax 概率，只为瑕疵类别保存
+“输出目录/类别/相对文件名.png”，不会导出背景通道。
 
-最佳权重默认保存到 `outputs/sam_acne/best/model.pt`。
-
-## 测试
-
-```powershell
-python test.py --config configs/train.yaml
-```
-
-输出包括每类别指标、macro/micro Precision、Recall、Dice/F1、IoU、Accuracy、Loss，以及恢复到原图尺寸的 0—255 预测热力图。热力图保存为 `输出目录/<类别>/<相对文件名>.png`。
-
-## 完整 smoke 自检
+## 离线完整 smoke test
 
 无需下载 SAM 权重：
 
-```powershell
-python tools/create_smoke_data.py --output-dir smoke_data
+~~~powershell
+python tools/create_smoke_data.py --output-dir smoke_data_partial
 python train.py --config configs/smoke.yaml
 python test.py --config configs/smoke.yaml
-```
+~~~
 
-`smoke.yaml` 使用 acne、pigmentation、scar 三类独立 mask；其 `tiny_segmenter` 仅用于检查多通道 Dataloader、逐类别 128 ignore、Loss、反向传播、按 step 验证、checkpoint 和分类别测试输出。正式训练请使用 `sam_encoder_segmenter`。
-
-## 显存建议
-
-SAM ViT-B 在 1024×1024 下显存占用较高。默认冻结 encoder、batch size 1，并开启梯度累积。需要全量微调时建议：
-
-1. 将 `freeze_encoder` 改为 `false`；
-2. 使用 fp16/bf16；
-3. 保持 batch size 1 并增大 `gradient_accumulation_steps`；
-4. 必要时启用梯度检查点；
-5. 优先尝试 LoRA/Adapter，而不是直接缩小输入破坏 SAM 位置编码。
+生成数据混合了单类别部分标注与全类别标注，用来验证 Dataloader、集合 Loss、反向传播、
+按 step 验证、checkpoint 和分类别热力图导出。正式训练请使用 sam_encoder_segmenter。
 
 ## 说明
 
-项目只用于计算机视觉研究，不构成医疗诊断。人脸属于敏感数据，应取得授权，并按人物身份切分 train/val/test，避免身份泄漏。
+项目只用于计算机视觉研究，不构成医疗诊断。人脸属于敏感数据，应取得授权并按人物身份
+切分 train/val/test，避免身份泄漏。

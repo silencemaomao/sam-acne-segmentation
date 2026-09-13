@@ -7,82 +7,103 @@ from torch import nn
 from torch.nn import functional as F
 
 
-class MaskedBCEDiceLoss(nn.Module):
+class PartialLabelCrossEntropyDiceLoss(nn.Module):
+    """Softmax loss for mutually-exclusive classes with set-valued targets."""
+
     def __init__(
         self,
-        bce_weight: float = 1.0,
+        ce_weight: float = 1.0,
         dice_weight: float = 1.0,
-        positive_weight: float | list[float] = 1.0,
+        class_weights: float | list[float] = 1.0,
         smooth: float = 1.0,
         **_: Any,
     ) -> None:
         super().__init__()
-        self.bce_weight = float(bce_weight)
-        self.dice_weight = float(dice_weight)
-        self.positive_weight = positive_weight
-        self.smooth = float(smooth)
+        self.ce_weight, self.dice_weight = float(ce_weight), float(dice_weight)
+        self.class_weights, self.smooth = class_weights, float(smooth)
 
-    def pixel_loss(self, logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        pos_weight = torch.as_tensor(self.positive_weight, device=logits.device, dtype=logits.dtype)
-        if pos_weight.ndim == 1:
-            pos_weight = pos_weight.view(1, -1, 1, 1)
-        return F.binary_cross_entropy_with_logits(
-            logits, target, reduction="none", pos_weight=pos_weight
+    def forward(
+        self, logits: torch.Tensor, allowed_classes: torch.Tensor
+    ) -> dict[str, torch.Tensor]:
+        if logits.shape != allowed_classes.shape:
+            raise ValueError(
+                f"logits shape {tuple(logits.shape)} != allowed_classes shape "
+                f"{tuple(allowed_classes.shape)}"
+            )
+        allowed = allowed_classes.bool()
+        allowed_count = allowed.sum(dim=1)
+        if torch.any(allowed_count == 0):
+            raise ValueError("allowed_classes contains an empty target set.")
+
+        log_probabilities = F.log_softmax(logits, dim=1)
+        allowed_log_probability = torch.logsumexp(
+            log_probabilities.masked_fill(~allowed, -torch.inf), dim=1
         )
+        informative = allowed_count < logits.shape[1]
+        if torch.any(informative):
+            per_pixel = -allowed_log_probability
+            exact = allowed_count == 1
+            weights = torch.as_tensor(
+                self.class_weights, device=logits.device, dtype=logits.dtype
+            )
+            if weights.ndim == 0:
+                weights = weights.repeat(logits.shape[1])
+            if weights.numel() != logits.shape[1]:
+                raise ValueError(
+                    f"class_weights has {weights.numel()} entries; expected {logits.shape[1]}."
+                )
+            exact_target = allowed.to(torch.int64).argmax(dim=1)
+            pixel_weights = torch.ones_like(per_pixel)
+            pixel_weights[exact] = weights[exact_target[exact]]
+            pixel = (per_pixel[informative] * pixel_weights[informative]).sum()
+            pixel = pixel / pixel_weights[informative].sum().clamp_min(1.0)
+        else:
+            pixel = logits.sum() * 0.0
 
-    def forward(self, logits: torch.Tensor, target: torch.Tensor) -> dict[str, torch.Tensor]:
-        if logits.shape != target.shape:
-            raise ValueError(f"logits shape {tuple(logits.shape)} != target shape {tuple(target.shape)}")
-        valid = target >= 0
-        target = target.clamp(0, 1)
-        if not torch.any(valid):
-            zero = logits.sum() * 0.0
-            return {"total": zero, "pixel": zero.detach(), "dice": zero.detach()}
-        pixel = self.pixel_loss(logits, target)[valid].mean()
-        probability, valid_float = torch.sigmoid(logits), valid.to(logits.dtype)
+        exact = allowed_count == 1
+        probabilities = torch.softmax(logits, dim=1)[:, 1:]
+        exact_target = allowed.to(torch.int64).argmax(dim=1)
+        target = F.one_hot(
+            exact_target.clamp_max(logits.shape[1] - 1), num_classes=logits.shape[1]
+        ).permute(0, 3, 1, 2)[:, 1:].to(logits.dtype)
+        valid = exact[:, None].to(logits.dtype)
         reduce_dims = (0, 2, 3)
-        intersection = (probability * target * valid_float).sum(dim=reduce_dims)
-        denominator = ((probability + target) * valid_float).sum(dim=reduce_dims)
-        dice_per_class = 1.0 - (2 * intersection + self.smooth) / (denominator + self.smooth)
-        supervised_classes = valid.sum(dim=reduce_dims) > 0
-        dice = dice_per_class[supervised_classes].mean()
-        return {
-            "total": self.bce_weight * pixel + self.dice_weight * dice,
-            "pixel": pixel.detach(),
-            "dice": dice.detach(),
-        }
-
-
-class MaskedFocalDiceLoss(MaskedBCEDiceLoss):
-    def __init__(self, focal_alpha: float = 0.75, focal_gamma: float = 2.0, **kwargs: Any):
-        super().__init__(**kwargs)
-        self.focal_alpha, self.focal_gamma = float(focal_alpha), float(focal_gamma)
-
-    def pixel_loss(self, logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        bce = F.binary_cross_entropy_with_logits(logits, target, reduction="none")
-        probability = torch.sigmoid(logits)
-        p_t = probability * target + (1 - probability) * (1 - target)
-        alpha_t = self.focal_alpha * target + (1 - self.focal_alpha) * (1 - target)
-        return alpha_t * (1 - p_t).pow(self.focal_gamma) * bce
+        intersection = (probabilities * target * valid).sum(dim=reduce_dims)
+        denominator = ((probabilities + target) * valid).sum(dim=reduce_dims)
+        dice_per_class = 1.0 - (2.0 * intersection + self.smooth) / (
+            denominator + self.smooth
+        )
+        has_positive = (target * valid).sum(dim=reduce_dims) > 0
+        dice = (
+            dice_per_class[has_positive].mean()
+            if torch.any(has_positive)
+            else logits.sum() * 0.0
+        )
+        total = self.ce_weight * pixel + self.dice_weight * dice
+        return {"total": total, "pixel": pixel.detach(), "dice": dice.detach()}
 
 
 def build_loss(config: dict[str, Any]) -> nn.Module:
     values = dict(config["loss"])
     loss_type = values.pop("type")
-    positive_weight = values.get("positive_weight", 1.0)
-    class_names = list(config["data"]["classes"])
-    if isinstance(positive_weight, dict):
-        missing = [name for name in class_names if name not in positive_weight]
-        if missing:
-            raise ValueError(f"loss.positive_weight is missing classes: {missing}")
-        values["positive_weight"] = [float(positive_weight[name]) for name in class_names]
-    elif isinstance(positive_weight, list) and len(positive_weight) != len(class_names):
+    if loss_type != "partial_label_ce_dice":
         raise ValueError(
-            "loss.positive_weight list length must equal len(data.classes), "
-            f"got {len(positive_weight)} and {len(class_names)}."
+            f"Unknown loss.type: {loss_type}. Mutually-exclusive partial labels require "
+            "'partial_label_ce_dice'."
         )
-    if loss_type == "masked_bce_dice":
-        return MaskedBCEDiceLoss(**values)
-    if loss_type == "masked_focal_dice":
-        return MaskedFocalDiceLoss(**values)
-    raise ValueError(f"Unknown loss.type: {loss_type}")
+    class_names = ["background", *list(config["data"]["classes"])]
+    class_weights = values.get("class_weights", 1.0)
+    if isinstance(class_weights, dict):
+        missing = [name for name in class_names[1:] if name not in class_weights]
+        if missing:
+            raise ValueError(f"loss.class_weights is missing classes: {missing}")
+        values["class_weights"] = [
+            float(class_weights.get("background", 1.0)),
+            *[float(class_weights[name]) for name in class_names[1:]],
+        ]
+    elif isinstance(class_weights, list) and len(class_weights) != len(class_names):
+        raise ValueError(
+            "loss.class_weights list must contain background followed by every data class; "
+            f"got {len(class_weights)} entries, expected {len(class_names)}."
+        )
+    return PartialLabelCrossEntropyDiceLoss(**values)

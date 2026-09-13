@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sam-acne-segmentation"
-version = "0.2.0"
-description = "Prompt-free multi-class facial mask segmentation using the Segment Anything image encoder"
+version = "0.3.0"
+description = "SAM encoder segmentation with mutually-exclusive partial-label learning"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

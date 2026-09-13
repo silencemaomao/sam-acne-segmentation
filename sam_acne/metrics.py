@@ -3,27 +3,40 @@ from __future__ import annotations
 import torch
 
 
-def confusion_counts(logits: torch.Tensor, target: torch.Tensor, threshold: float) -> torch.Tensor:
-    if logits.shape != target.shape:
-        raise ValueError(f"logits shape {tuple(logits.shape)} != target shape {tuple(target.shape)}")
-    prediction = torch.sigmoid(logits) >= threshold
-    valid, positive, negative = target >= 0, target == 1, target == 0
-    reduce_dims = (0, 2, 3)
-    return torch.stack(
-        [
-            (prediction & positive & valid).sum(dim=reduce_dims),
-            (prediction & negative & valid).sum(dim=reduce_dims),
-            ((~prediction) & positive & valid).sum(dim=reduce_dims),
-            ((~prediction) & negative & valid).sum(dim=reduce_dims),
-        ],
-        dim=1,
-    ).double()
+def confusion_counts(
+    logits: torch.Tensor, allowed_classes: torch.Tensor
+) -> torch.Tensor:
+    if logits.shape != allowed_classes.shape:
+        raise ValueError(
+            f"logits shape {tuple(logits.shape)} != allowed_classes shape "
+            f"{tuple(allowed_classes.shape)}"
+        )
+    allowed = allowed_classes.bool()
+    resolved = allowed.sum(dim=1) == 1
+    target = allowed.to(torch.int64).argmax(dim=1)
+    prediction = logits.argmax(dim=1)
+    counts = []
+    for class_index in range(1, logits.shape[1]):
+        positive = resolved & (target == class_index)
+        negative = resolved & (target != class_index)
+        predicted = prediction == class_index
+        counts.append(
+            torch.stack(
+                [
+                    (predicted & positive).sum(),
+                    (predicted & negative).sum(),
+                    ((~predicted) & positive).sum(),
+                    ((~predicted) & negative).sum(),
+                ]
+            )
+        )
+    return torch.stack(counts).double()
 
 
 def _binary_metrics(counts: torch.Tensor) -> dict[str, float]:
     tp, fp, fn, tn = [float(value) for value in counts.tolist()]
     eps = 1e-12
-    dice = 2 * tp / (2 * tp + fp + fn + eps)
+    dice = 2.0 * tp / (2.0 * tp + fp + fn + eps)
     return {
         "precision": tp / (tp + fp + eps),
         "recall": tp / (tp + fn + eps),
@@ -45,7 +58,9 @@ def metrics_from_counts(counts: torch.Tensor, class_names: list[str]) -> dict[st
         for metric_name, value in values.items():
             result[f"class/{class_name}/{metric_name}"] = value
     for metric_name in ("precision", "recall", "dice", "f1", "iou", "accuracy"):
-        result[f"macro_{metric_name}"] = sum(values[metric_name] for values in per_class) / len(per_class)
+        result[f"macro_{metric_name}"] = sum(
+            values[metric_name] for values in per_class
+        ) / len(per_class)
     micro = _binary_metrics(counts.sum(dim=0))
     for metric_name, value in micro.items():
         result[f"micro_{metric_name}"] = value
